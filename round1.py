@@ -88,7 +88,7 @@ PRODUCTS = {
         "vol_filter": 15,     # min volume to count as market-maker quote
     },
     "INTARIAN_PEPPER_ROOT": {
-        "type": "drifter",
+        "type": "ipr",
         "position_limit": 80,
         "take_width": 1,
         "default_edge": 5,
@@ -97,6 +97,8 @@ PRODUCTS = {
         "base_size": 15,
         "skew_per": 5,
         "vol_filter": 15,
+        "obi_weight": 2.0,        # directional OBI: heavy bids → price RISE (+0.27 corr)
+        "reversion_coeff": 0.4,   # mean reversion: autocorr(1) = -0.50
     },
 }
 
@@ -119,6 +121,8 @@ class Trader:
             cfg = PRODUCTS[product]
             if cfg["type"] == "stationary":
                 orders = self.trade_stationary(product, state, cfg)
+            elif cfg["type"] == "ipr":
+                orders, trader_data = self.trade_ipr(product, state, cfg, trader_data)
             else:
                 orders, trader_data = self.trade_drifter(product, state, cfg, trader_data)
             result[product] = orders
@@ -307,6 +311,124 @@ class Trader:
         qty = min(sell_size, hard + (pos - sv))
         if qty > 0:
             orders.append(Order(product, ask_price, -qty))
+
+        return orders, trader_data
+
+    # ════════════════════════════════════════════════════════
+    # IPR: INTARIAN_PEPPER_ROOT — signal-enhanced drifter
+    # OBI is DIRECTIONAL (+0.27): heavy bids → price RISE
+    # Mean reversion: autocorr(1) = -0.50
+    # ════════════════════════════════════════════════════════
+
+    def trade_ipr(self, product: str, state: TradingState,
+                  cfg: dict, trader_data: dict) -> tuple:
+        od = state.order_depths[product]
+        pos = state.position.get(product, 0)
+        hard = cfg["hard_limit"]
+        orders: List[Order] = []
+
+        if not od.buy_orders or not od.sell_orders:
+            return orders, trader_data
+
+        best_bid = max(od.buy_orders.keys())
+        best_ask = min(od.sell_orders.keys())
+
+        # Volume-filtered mid
+        vf = cfg["vol_filter"]
+        fb = {p: v for p, v in od.buy_orders.items() if v >= vf}
+        fa = {p: v for p, v in od.sell_orders.items() if -v >= vf}
+
+        if fb and fa:
+            mid = (max(fb.keys()) + min(fa.keys())) / 2
+        else:
+            mid = (best_bid + best_ask) / 2
+
+        # ── Retrieve persisted state ──
+        ipr_data = trader_data.get(product, {})
+        prev_mid = ipr_data.get("prev_mid", mid)
+
+        # ── SIGNAL 1: Directional OBI ──
+        # IPR: heavy bids predict price RISE (corr +0.27)
+        total_bid_vol = sum(od.buy_orders.values())
+        total_ask_vol = sum(-v for v in od.sell_orders.values())
+        obi = (total_bid_vol - total_ask_vol) / max(total_bid_vol + total_ask_vol, 1)
+        obi_shift = obi * cfg["obi_weight"]
+
+        # ── SIGNAL 2: Mean Reversion ──
+        # autocorr(1) = -0.50: last tick's move partially reverses
+        last_move = mid - prev_mid
+        reversion_shift = -last_move * cfg["reversion_coeff"]
+
+        # ── Fair value with signal adjustments ──
+        fair = round(mid + obi_shift + reversion_shift)
+
+        bv = 0
+        sv = 0
+
+        # ── TAKE ──
+        for price in sorted(od.sell_orders.keys()):
+            if price > fair - cfg["take_width"]:
+                break
+            vol = -od.sell_orders[price]
+            qty = min(vol, hard - (pos + bv))
+            if qty > 0:
+                orders.append(Order(product, price, qty))
+                bv += qty
+
+        for price in sorted(od.buy_orders.keys(), reverse=True):
+            if price < fair + cfg["take_width"]:
+                break
+            vol = od.buy_orders[price]
+            qty = min(vol, hard + (pos - sv))
+            if qty > 0:
+                orders.append(Order(product, price, -qty))
+                sv += qty
+
+        # ── CLEAR ──
+        cur = pos + bv - sv
+        if cur > cfg["soft_limit"]:
+            qty = min(cur - cfg["soft_limit"], hard + (pos - sv))
+            if qty > 0:
+                orders.append(Order(product, fair, -qty))
+                sv += qty
+        elif cur < -cfg["soft_limit"]:
+            qty = min(-cur - cfg["soft_limit"], hard - (pos + bv))
+            if qty > 0:
+                orders.append(Order(product, fair, qty))
+                bv += qty
+
+        # ── MAKE ──
+        cur = pos + bv - sv
+        skew = math.floor(cur / cfg["skew_per"])
+
+        bid_price = fair - cfg["default_edge"] - skew
+        ask_price = fair + cfg["default_edge"] - skew
+
+        buy_size = cfg["base_size"] - max(0, cur) // 3
+        sell_size = cfg["base_size"] + min(0, cur) // 3
+        buy_size = max(3, min(20, buy_size))
+        sell_size = max(3, min(20, sell_size))
+
+        # OBI-informed sizing: lean into the directional signal
+        if obi > 0.15:
+            # Heavy bids → expect rise → buy more, sell less
+            buy_size = min(25, buy_size + 3)
+            sell_size = max(2, sell_size - 3)
+        elif obi < -0.15:
+            # Heavy asks → expect drop → sell more, buy less
+            sell_size = min(25, sell_size + 3)
+            buy_size = max(2, buy_size - 3)
+
+        qty = min(buy_size, hard - (pos + bv))
+        if qty > 0:
+            orders.append(Order(product, bid_price, qty))
+
+        qty = min(sell_size, hard + (pos - sv))
+        if qty > 0:
+            orders.append(Order(product, ask_price, -qty))
+
+        # Persist state
+        trader_data[product] = {"prev_mid": mid}
 
         return orders, trader_data
 
