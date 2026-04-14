@@ -1,7 +1,95 @@
 import json
 import math
 from typing import Dict, List, Any
-from datamodel import OrderDepth, TradingState, Order
+from datamodel import OrderDepth, TradingState, Order, ProsperityEncoder
+
+
+class Logger:
+    """Compressed JSON logger compatible with jmerle's Prosperity 3 Visualizer.
+    See: https://jmerle.github.io/imc-prosperity-3-visualizer/
+    """
+
+    def __init__(self) -> None:
+        self.logs = ""
+        self.max_log_length = 3750
+
+    def print(self, *objects: Any, sep: str = " ", end: str = "\n") -> None:
+        self.logs += sep.join(map(str, objects)) + end
+
+    def flush(
+        self,
+        state: TradingState,
+        orders: Dict[str, List[Order]],
+        conversions: int,
+        trader_data: str,
+    ) -> None:
+        base = [
+            self.compress_state(state, ""),
+            self.compress_orders(orders),
+            conversions,
+            trader_data,
+            self.logs,
+        ]
+        print(json.dumps(base, cls=ProsperityEncoder, separators=(",", ":")))
+        self.logs = ""
+
+    def compress_state(self, state: TradingState, trader_data: str) -> list:
+        return [
+            state.timestamp,
+            trader_data,
+            self.compress_listings(state.listings),
+            self.compress_order_depths(state.order_depths),
+            self.compress_trades(state.own_trades),
+            self.compress_trades(state.market_trades),
+            state.position,
+            self.compress_observations(state.observations),
+        ]
+
+    def compress_listings(self, listings) -> list:
+        compressed = []
+        for listing in listings.values():
+            compressed.append(
+                [listing.symbol, listing.product, listing.denomination]
+            )
+        return compressed
+
+    def compress_order_depths(self, order_depths) -> dict:
+        compressed = {}
+        for symbol, od in order_depths.items():
+            compressed[symbol] = [od.buy_orders, od.sell_orders]
+        return compressed
+
+    def compress_trades(self, trades) -> list:
+        compressed = []
+        for symbol, trade_list in trades.items():
+            for t in trade_list:
+                compressed.append(
+                    [t.symbol, t.price, t.quantity, t.buyer, t.seller, t.timestamp]
+                )
+        return compressed
+
+    def compress_orders(self, orders) -> dict:
+        compressed = {}
+        for symbol, order_list in orders.items():
+            compressed[symbol] = [[o.price, o.quantity] for o in order_list]
+        return compressed
+
+    def compress_observations(self, obs) -> list:
+        conv = {}
+        for product, co in obs.conversionObservations.items():
+            conv[product] = [
+                co.bidPrice,
+                co.askPrice,
+                co.transportFees,
+                co.exportTariff,
+                co.importTariff,
+                co.sunlight,
+                co.humidity,
+            ]
+        return [obs.plainValueObservations, conv]
+
+
+logger = Logger()
 
 
 # Position limits per product
@@ -52,6 +140,8 @@ class Trader:
 
         conversions = 0
         traderData = json.dumps(trader_data)
+
+        logger.flush(state, result, conversions, traderData)
         return result, conversions, traderData
 
     # ──────────────────────────────────────────────

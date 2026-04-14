@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+backtesting/kevin-fu1-backtester/
+backtesting/monte-carlo-backtester/
+*.log
