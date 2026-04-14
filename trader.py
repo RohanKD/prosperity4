@@ -109,12 +109,15 @@ EMERALDS_SOFT_LIMIT = 20       # start inventory skewing here
 EMERALDS_BASE_SIZE = 20        # base order size
 
 # TOMATOES: drifting asset, use adaptive fair value
-TOMATOES_EMA_SHORT = 10
-TOMATOES_EMA_LONG = 30
+TOMATOES_EMA_FAST = 5          # fast EMA for fair value (was 10 - too slow)
+TOMATOES_EMA_SLOW = 20         # slow EMA for trend detection (was 30)
 TOMATOES_TAKE_WIDTH = 1
-TOMATOES_DEFAULT_EDGE = 3
-TOMATOES_SOFT_LIMIT = 20
-TOMATOES_BASE_SIZE = 15
+TOMATOES_DEFAULT_EDGE = 2      # tighter default spread to capture more
+TOMATOES_SOFT_LIMIT = 15       # lower soft limit (was 20) — less inventory risk
+TOMATOES_HARD_LIMIT = 40       # hard cap — never hold more than this
+TOMATOES_BASE_SIZE = 12        # slightly smaller base size
+TOMATOES_TREND_THRESHOLD = 2   # EMA diff to trigger trend mode
+TOMATOES_MOMENTUM_WINDOW = 10  # ticks to measure momentum
 
 
 class Trader:
@@ -261,8 +264,8 @@ class Trader:
         return orders, trader_data
 
     # ──────────────────────────────────────────────
-    # TOMATOES: Adaptive market-making on a drifting asset
-    # Uses EMA-based fair value estimation
+    # TOMATOES: Trend-aware market-making on a drifting asset
+    # Fast EMA fair value + momentum detection + aggressive inventory clearing
     # ──────────────────────────────────────────────
 
     def trade_tomatoes(self, state: TradingState, trader_data: dict):
@@ -272,7 +275,6 @@ class Trader:
         limit = POSITION_LIMITS[product]
         orders: List[Order] = []
 
-        # Compute mid price from order book
         if not order_depth.buy_orders or not order_depth.sell_orders:
             return orders, trader_data
 
@@ -290,32 +292,42 @@ class Trader:
         else:
             mid = (best_bid + best_ask) / 2
 
-        # Update EMA history
+        # ── Update state ──
         tomato_data = trader_data.get("TOMATOES", {})
-        ema_short = tomato_data.get("ema_short", mid)
-        ema_long = tomato_data.get("ema_long", mid)
+        ema_fast = tomato_data.get("ema_fast", mid)
+        ema_slow = tomato_data.get("ema_slow", mid)
         prices = tomato_data.get("prices", [])
 
-        alpha_short = 2 / (TOMATOES_EMA_SHORT + 1)
-        alpha_long = 2 / (TOMATOES_EMA_LONG + 1)
-        ema_short = alpha_short * mid + (1 - alpha_short) * ema_short
-        ema_long = alpha_long * mid + (1 - alpha_long) * ema_long
+        alpha_fast = 2 / (TOMATOES_EMA_FAST + 1)
+        alpha_slow = 2 / (TOMATOES_EMA_SLOW + 1)
+        ema_fast = alpha_fast * mid + (1 - alpha_fast) * ema_fast
+        ema_slow = alpha_slow * mid + (1 - alpha_slow) * ema_slow
 
         prices.append(mid)
         if len(prices) > 50:
             prices = prices[-50:]
 
-        # Fair value: use short EMA as the adaptive fair value
-        fair = round(ema_short)
+        # Fair value: use fast EMA, but weight toward raw mid to reduce lag
+        fair = round(0.5 * mid + 0.5 * ema_fast)
 
-        # Compute volatility for dynamic spread
-        if len(prices) >= 10:
-            returns = [prices[i] / prices[i - 1] - 1 for i in range(1, len(prices))]
-            vol = max(1, round(math.sqrt(sum(r * r for r in returns[-10:]) / 10) * 1000))
-        else:
-            vol = TOMATOES_DEFAULT_EDGE
+        # ── Trend & momentum detection ──
+        trend = ema_fast - ema_slow  # positive = bullish, negative = bearish
+        trending_up = trend > TOMATOES_TREND_THRESHOLD
+        trending_down = trend < -TOMATOES_TREND_THRESHOLD
 
-        spread = max(TOMATOES_DEFAULT_EDGE, vol)
+        # Short-term momentum from recent price changes
+        momentum = 0
+        if len(prices) >= TOMATOES_MOMENTUM_WINDOW:
+            momentum = prices[-1] - prices[-TOMATOES_MOMENTUM_WINDOW]
+
+        # ── Effective position limit: cap exposure in trends ──
+        # If we're long in a downtrend or short in an uptrend, reduce limits aggressively
+        eff_long_limit = TOMATOES_HARD_LIMIT
+        eff_short_limit = TOMATOES_HARD_LIMIT
+        if trending_down:
+            eff_long_limit = TOMATOES_SOFT_LIMIT  # don't accumulate longs in downtrend
+        if trending_up:
+            eff_short_limit = TOMATOES_SOFT_LIMIT  # don't accumulate shorts in uptrend
 
         buy_volume = 0
         sell_volume = 0
@@ -325,7 +337,7 @@ class Trader:
             if ask_price > fair - TOMATOES_TAKE_WIDTH:
                 break
             ask_vol = -order_depth.sell_orders[ask_price]
-            can_buy = limit - (position + buy_volume)
+            can_buy = eff_long_limit - (position + buy_volume)
             qty = min(ask_vol, can_buy)
             if qty > 0:
                 orders.append(Order(product, ask_price, qty))
@@ -335,57 +347,104 @@ class Trader:
             if bid_price < fair + TOMATOES_TAKE_WIDTH:
                 break
             bid_vol = order_depth.buy_orders[bid_price]
-            can_sell = limit + (position - sell_volume)
+            can_sell = eff_short_limit + (position - sell_volume)
             qty = min(bid_vol, can_sell)
             if qty > 0:
                 orders.append(Order(product, bid_price, -qty))
                 sell_volume += qty
 
-        # ── Phase 2: MAKE passive quotes ──
+        # ── Phase 2: CLEAR — aggressively reduce inventory against trends ──
         current_pos = position + buy_volume - sell_volume
 
-        # Inventory skew
-        skew = math.floor(current_pos / 10)
+        # If long in a downtrend: urgently sell
+        if current_pos > 0 and trending_down:
+            clear_qty = min(current_pos, max(5, abs(current_pos) // 2))
+            can_sell = eff_short_limit + (position - sell_volume)
+            qty = min(clear_qty, can_sell)
+            if qty > 0:
+                # Sell at fair value (aggressive) to get out fast
+                orders.append(Order(product, fair, -qty))
+                sell_volume += qty
 
-        bid_price = fair - spread - skew
-        ask_price = fair + spread - skew
+        # If short in an uptrend: urgently buy
+        elif current_pos < 0 and trending_up:
+            clear_qty = min(-current_pos, max(5, abs(current_pos) // 2))
+            can_buy = eff_long_limit - (position + buy_volume)
+            qty = min(clear_qty, can_buy)
+            if qty > 0:
+                orders.append(Order(product, fair, qty))
+                buy_volume += qty
 
-        # Size adjustments
-        buy_size = TOMATOES_BASE_SIZE - max(0, current_pos) // 5
-        sell_size = TOMATOES_BASE_SIZE + min(0, current_pos) // 5
-        buy_size = max(5, min(25, buy_size))
-        sell_size = max(5, min(25, sell_size))
+        # Normal soft limit clearing (when not in crisis mode)
+        current_pos = position + buy_volume - sell_volume
+        if current_pos > TOMATOES_SOFT_LIMIT and not trending_up:
+            clear_qty = current_pos - TOMATOES_SOFT_LIMIT
+            can_sell = eff_short_limit + (position - sell_volume)
+            qty = min(clear_qty, can_sell)
+            if qty > 0:
+                orders.append(Order(product, fair + 1, -qty))
+                sell_volume += qty
+        elif current_pos < -TOMATOES_SOFT_LIMIT and not trending_down:
+            clear_qty = -current_pos - TOMATOES_SOFT_LIMIT
+            can_buy = eff_long_limit - (position + buy_volume)
+            qty = min(clear_qty, can_buy)
+            if qty > 0:
+                orders.append(Order(product, fair - 1, qty))
+                buy_volume += qty
 
-        can_buy = limit - (position + buy_volume)
+        # ── Phase 3: MAKE passive quotes ──
+        current_pos = position + buy_volume - sell_volume
+
+        # Stronger inventory skew: 1 tick per 5 units (was per 10)
+        skew = math.floor(current_pos / 5)
+
+        # Widen spread in trends to avoid adverse selection
+        spread = TOMATOES_DEFAULT_EDGE
+        if trending_up or trending_down:
+            spread += 2  # wider when trending
+
+        # Trend-adjusted quotes: shift both quotes in trend direction
+        trend_shift = 0
+        if trending_up:
+            trend_shift = 1  # shift quotes up
+        elif trending_down:
+            trend_shift = -1  # shift quotes down
+
+        bid_price = fair - spread - skew + trend_shift
+        ask_price = fair + spread - skew + trend_shift
+
+        # Size: reduce size on the side that fights the trend
+        buy_size = TOMATOES_BASE_SIZE
+        sell_size = TOMATOES_BASE_SIZE
+
+        # Inventory-based sizing
+        buy_size -= max(0, current_pos) // 3
+        sell_size += min(0, current_pos) // 3
+        buy_size = max(3, min(20, buy_size))
+        sell_size = max(3, min(20, sell_size))
+
+        # Trend-based sizing: reduce size on the losing side
+        if trending_down:
+            buy_size = max(2, buy_size // 2)  # don't buy much in downtrend
+            sell_size = min(25, sell_size + 3)
+        elif trending_up:
+            sell_size = max(2, sell_size // 2)  # don't sell much in uptrend
+            buy_size = min(25, buy_size + 3)
+
+        can_buy = eff_long_limit - (position + buy_volume)
         qty = min(buy_size, can_buy)
         if qty > 0:
             orders.append(Order(product, bid_price, qty))
 
-        can_sell = limit + (position - sell_volume)
+        can_sell = eff_short_limit + (position - sell_volume)
         qty = min(sell_size, can_sell)
         if qty > 0:
             orders.append(Order(product, ask_price, -qty))
 
-        # Trend signal: if short EMA > long EMA, slightly favor longs
-        if len(prices) >= TOMATOES_EMA_LONG and ema_short > ema_long + 1:
-            # Bullish: add an extra bid closer to fair
-            extra_bid = fair - 1 - skew
-            can_buy_extra = limit - (position + buy_volume + qty)
-            eq = min(5, can_buy_extra)
-            if eq > 0:
-                orders.append(Order(product, extra_bid, eq))
-        elif len(prices) >= TOMATOES_EMA_LONG and ema_short < ema_long - 1:
-            # Bearish: add an extra ask closer to fair
-            extra_ask = fair + 1 - skew
-            can_sell_extra = limit + (position - sell_volume - qty)
-            eq = min(5, can_sell_extra)
-            if eq > 0:
-                orders.append(Order(product, extra_ask, -eq))
-
         # Persist state
         trader_data["TOMATOES"] = {
-            "ema_short": ema_short,
-            "ema_long": ema_long,
+            "ema_fast": ema_fast,
+            "ema_slow": ema_slow,
             "prices": prices,
         }
 
