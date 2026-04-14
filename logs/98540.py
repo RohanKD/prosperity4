@@ -102,22 +102,19 @@ POSITION_LIMITS = {
 EMERALDS_FAIR_VALUE = 10000
 EMERALDS_TAKE_WIDTH = 1        # take orders mispriced by >= this many ticks
 EMERALDS_CLEAR_WIDTH = 0       # clear inventory at fair_value +/- this
-EMERALDS_DISREGARD_EDGE = 1    # ignore book levels within this of fair value (was 2)
-EMERALDS_JOIN_EDGE = 2         # join existing level if within this of fair value (was 1)
-EMERALDS_DEFAULT_EDGE = 4      # default quote distance (was 8 - tighter to get more fills)
-EMERALDS_SOFT_LIMIT = 40       # allow more inventory before skewing
-EMERALDS_BASE_SIZE = 35        # larger orders to capture more spread
+EMERALDS_DISREGARD_EDGE = 2    # ignore book levels within this of fair value for quoting
+EMERALDS_JOIN_EDGE = 1         # join existing level if within this of fair value
+EMERALDS_DEFAULT_EDGE = 8      # default quote distance from fair value
+EMERALDS_SOFT_LIMIT = 20       # start inventory skewing here
+EMERALDS_BASE_SIZE = 20        # base order size
 
-# TOMATOES: mean-reverting drifter — optimized via grid search
-# Wider spread (edge=3) was the biggest win — captures more per round trip
-# Signals (OBI, mean-rev) had minimal backtest impact vs spread/inventory tuning
+# TOMATOES: drifting asset, use adaptive fair value
+TOMATOES_EMA_SHORT = 10
+TOMATOES_EMA_LONG = 30
 TOMATOES_TAKE_WIDTH = 1
-TOMATOES_DEFAULT_EDGE = 3      # wider spread = more profit per fill (was 2)
-TOMATOES_SOFT_LIMIT = 20       # moderate inventory tolerance
-TOMATOES_HARD_LIMIT = 40       # allow reasonable exposure
-TOMATOES_BASE_SIZE = 15        # larger orders
-TOMATOES_OBI_WEIGHT = 0        # disabled — marginal backtest impact
-TOMATOES_REVERSION_COEFF = 0   # disabled — marginal backtest impact
+TOMATOES_DEFAULT_EDGE = 3
+TOMATOES_SOFT_LIMIT = 20
+TOMATOES_BASE_SIZE = 15
 
 
 class Trader:
@@ -264,8 +261,8 @@ class Trader:
         return orders, trader_data
 
     # ──────────────────────────────────────────────
-    # TOMATOES: Mean-reversion MM with contrarian OBI
-    # autocorr(1) = -0.44, OBI->next_tick = -0.617 (contrarian)
+    # TOMATOES: Adaptive market-making on a drifting asset
+    # Uses EMA-based fair value estimation
     # ──────────────────────────────────────────────
 
     def trade_tomatoes(self, state: TradingState, trader_data: dict):
@@ -275,41 +272,50 @@ class Trader:
         limit = POSITION_LIMITS[product]
         orders: List[Order] = []
 
+        # Compute mid price from order book
         if not order_depth.buy_orders or not order_depth.sell_orders:
             return orders, trader_data
 
         best_bid = max(order_depth.buy_orders.keys())
         best_ask = min(order_depth.sell_orders.keys())
 
-        # Volume-filtered mid from market-maker quotes
+        # Volume-filtered mid: ignore small orders (likely noise)
         filtered_bids = {p: v for p, v in order_depth.buy_orders.items() if v >= 15}
         filtered_asks = {p: v for p, v in order_depth.sell_orders.items() if -v >= 15}
 
         if filtered_bids and filtered_asks:
-            mid = (max(filtered_bids.keys()) + min(filtered_asks.keys())) / 2
+            fb = max(filtered_bids.keys())
+            fa = min(filtered_asks.keys())
+            mid = (fb + fa) / 2
         else:
             mid = (best_bid + best_ask) / 2
 
-        # ── Update state ──
+        # Update EMA history
         tomato_data = trader_data.get("TOMATOES", {})
-        prev_mid = tomato_data.get("prev_mid", mid)
+        ema_short = tomato_data.get("ema_short", mid)
+        ema_long = tomato_data.get("ema_long", mid)
+        prices = tomato_data.get("prices", [])
 
-        # ── SIGNAL 1: Contrarian OBI ──
-        # Deep analysis: OBI -> next tick mid = -0.617
-        # Heavy bids = price about to DROP, heavy asks = price about to RISE
-        total_bid_vol = sum(order_depth.buy_orders.values())
-        total_ask_vol = sum(-v for v in order_depth.sell_orders.values())
-        obi = (total_bid_vol - total_ask_vol) / max(total_bid_vol + total_ask_vol, 1)
-        # CONTRARIAN: flip the sign. OBI>0 (heavy bids) → expect drop → shift fair DOWN
-        obi_shift = -obi * TOMATOES_OBI_WEIGHT
+        alpha_short = 2 / (TOMATOES_EMA_SHORT + 1)
+        alpha_long = 2 / (TOMATOES_EMA_LONG + 1)
+        ema_short = alpha_short * mid + (1 - alpha_short) * ema_short
+        ema_long = alpha_long * mid + (1 - alpha_long) * ema_long
 
-        # ── SIGNAL 2: 1-tick Mean Reversion ──
-        # autocorr(1) = -0.44: last tick's move will partially reverse
-        last_move = mid - prev_mid
-        reversion_shift = -last_move * TOMATOES_REVERSION_COEFF
+        prices.append(mid)
+        if len(prices) > 50:
+            prices = prices[-50:]
 
-        # ── Fair value: raw mid + signal adjustments ──
-        fair = round(mid + obi_shift + reversion_shift)
+        # Fair value: use short EMA as the adaptive fair value
+        fair = round(ema_short)
+
+        # Compute volatility for dynamic spread
+        if len(prices) >= 10:
+            returns = [prices[i] / prices[i - 1] - 1 for i in range(1, len(prices))]
+            vol = max(1, round(math.sqrt(sum(r * r for r in returns[-10:]) / 10) * 1000))
+        else:
+            vol = TOMATOES_DEFAULT_EDGE
+
+        spread = max(TOMATOES_DEFAULT_EDGE, vol)
 
         buy_volume = 0
         sell_volume = 0
@@ -319,7 +325,7 @@ class Trader:
             if ask_price > fair - TOMATOES_TAKE_WIDTH:
                 break
             ask_vol = -order_depth.sell_orders[ask_price]
-            can_buy = TOMATOES_HARD_LIMIT - (position + buy_volume)
+            can_buy = limit - (position + buy_volume)
             qty = min(ask_vol, can_buy)
             if qty > 0:
                 orders.append(Order(product, ask_price, qty))
@@ -329,64 +335,58 @@ class Trader:
             if bid_price < fair + TOMATOES_TAKE_WIDTH:
                 break
             bid_vol = order_depth.buy_orders[bid_price]
-            can_sell = TOMATOES_HARD_LIMIT + (position - sell_volume)
+            can_sell = limit + (position - sell_volume)
             qty = min(bid_vol, can_sell)
             if qty > 0:
                 orders.append(Order(product, bid_price, -qty))
                 sell_volume += qty
 
-        # ── Phase 2: CLEAR excess inventory ──
-        current_pos = position + buy_volume - sell_volume
-        if current_pos > TOMATOES_SOFT_LIMIT:
-            clear_qty = current_pos - TOMATOES_SOFT_LIMIT
-            can_sell = TOMATOES_HARD_LIMIT + (position - sell_volume)
-            qty = min(clear_qty, can_sell)
-            if qty > 0:
-                orders.append(Order(product, fair, -qty))
-                sell_volume += qty
-        elif current_pos < -TOMATOES_SOFT_LIMIT:
-            clear_qty = -current_pos - TOMATOES_SOFT_LIMIT
-            can_buy = TOMATOES_HARD_LIMIT - (position + buy_volume)
-            qty = min(clear_qty, can_buy)
-            if qty > 0:
-                orders.append(Order(product, fair, qty))
-                buy_volume += qty
-
-        # ── Phase 3: MAKE passive quotes ──
+        # ── Phase 2: MAKE passive quotes ──
         current_pos = position + buy_volume - sell_volume
 
-        # Inventory skew: 1 tick per 5 units
-        skew = math.floor(current_pos / 5)
+        # Inventory skew
+        skew = math.floor(current_pos / 10)
 
-        bid_price = fair - TOMATOES_DEFAULT_EDGE - skew
-        ask_price = fair + TOMATOES_DEFAULT_EDGE - skew
+        bid_price = fair - spread - skew
+        ask_price = fair + spread - skew
 
-        # Inventory-aware sizing
-        buy_size = TOMATOES_BASE_SIZE - max(0, current_pos) // 3
-        sell_size = TOMATOES_BASE_SIZE + min(0, current_pos) // 3
-        buy_size = max(3, min(20, buy_size))
-        sell_size = max(3, min(20, sell_size))
+        # Size adjustments
+        buy_size = TOMATOES_BASE_SIZE - max(0, current_pos) // 5
+        sell_size = TOMATOES_BASE_SIZE + min(0, current_pos) // 5
+        buy_size = max(5, min(25, buy_size))
+        sell_size = max(5, min(25, sell_size))
 
-        # OBI-informed sizing (CONTRARIAN)
-        # Heavy bids (obi>0) → expect drop → sell more, buy less
-        if obi > 0.15:
-            sell_size = min(25, sell_size + 3)
-            buy_size = max(2, buy_size - 3)
-        elif obi < -0.15:
-            buy_size = min(25, buy_size + 3)
-            sell_size = max(2, sell_size - 3)
-
-        can_buy = TOMATOES_HARD_LIMIT - (position + buy_volume)
+        can_buy = limit - (position + buy_volume)
         qty = min(buy_size, can_buy)
         if qty > 0:
             orders.append(Order(product, bid_price, qty))
 
-        can_sell = TOMATOES_HARD_LIMIT + (position - sell_volume)
+        can_sell = limit + (position - sell_volume)
         qty = min(sell_size, can_sell)
         if qty > 0:
             orders.append(Order(product, ask_price, -qty))
 
+        # Trend signal: if short EMA > long EMA, slightly favor longs
+        if len(prices) >= TOMATOES_EMA_LONG and ema_short > ema_long + 1:
+            # Bullish: add an extra bid closer to fair
+            extra_bid = fair - 1 - skew
+            can_buy_extra = limit - (position + buy_volume + qty)
+            eq = min(5, can_buy_extra)
+            if eq > 0:
+                orders.append(Order(product, extra_bid, eq))
+        elif len(prices) >= TOMATOES_EMA_LONG and ema_short < ema_long - 1:
+            # Bearish: add an extra ask closer to fair
+            extra_ask = fair + 1 - skew
+            can_sell_extra = limit + (position - sell_volume - qty)
+            eq = min(5, can_sell_extra)
+            if eq > 0:
+                orders.append(Order(product, extra_ask, -eq))
+
         # Persist state
-        trader_data["TOMATOES"] = {"prev_mid": mid}
+        trader_data["TOMATOES"] = {
+            "ema_short": ema_short,
+            "ema_long": ema_long,
+            "prices": prices,
+        }
 
         return orders, trader_data
