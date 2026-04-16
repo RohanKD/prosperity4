@@ -109,8 +109,7 @@ class Trader:
             if product == "EMERALDS":
                 result[product] = self.trade_stationary(product, state, EMERALDS_CFG)
             elif product == "ASH_COATED_OSMIUM":
-                orders, trader_data = self.trade_osmium(state, trader_data)
-                result[product] = orders
+                result[product] = self.trade_stationary(product, state, OSMIUM_CFG)
             elif product == "TOMATOES":
                 orders, trader_data = self.trade_drifter(product, state, TOMATOES_CFG, trader_data)
                 result[product] = orders
