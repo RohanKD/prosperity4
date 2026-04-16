@@ -60,11 +60,11 @@ POSITION_LIMITS = {
 #   - never voluntarily reduce long position
 #   - clear shorts immediately (being short in an uptrend destroys value)
 PEPPER_SLOPE = 0.001            # price increase per timestamp unit
-PEPPER_TAKE_PREMIUM = 8         # buy asks up to 8 ticks ABOVE trend fair (worth it)
+PEPPER_TAKE_PREMIUM = 4         # was 8
 PEPPER_SELL_FLOOR = 15          # only fill sell side if bid is 15+ ticks above fair
 PEPPER_BID_EDGE = 2             # passive bid at fair - 2 (aggressive, fills often)
 PEPPER_ASK_EDGE = 20            # passive ask at fair + 20 (very wide, rarely fills)
-PEPPER_BASE_BID_SIZE = 30       # large bids to accumulate fast
+PEPPER_BASE_BID_SIZE = 50       # was 30
 PEPPER_BASE_ASK_SIZE = 5        # small asks, we don't want to sell
 
 # ── ASH_COATED_OSMIUM ─────────────────────────────────────────────────────────
@@ -77,9 +77,9 @@ OSMIUM_FAIR_VALUE = 10000
 OSMIUM_TAKE_WIDTH = 1           # take asks ≤ 9999, bids ≥ 10001
 OSMIUM_CLEAR_WIDTH = 0          # clear excess inventory at exactly 10000
 OSMIUM_DISREGARD_EDGE = 2       # ignore levels within 2 of fair for passive quoting
-OSMIUM_DEFAULT_EDGE = 5         # quote at 9995/10005 by default
+OSMIUM_DEFAULT_EDGE = 4        # was 5
 OSMIUM_SOFT_LIMIT = 20          # start skewing at ±20 inventory
-OSMIUM_BASE_SIZE = 20
+OSMIUM_BASE_SIZE = 25          # was 20
 
 
 class Trader:

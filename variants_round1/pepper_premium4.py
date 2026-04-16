@@ -60,7 +60,7 @@ POSITION_LIMITS = {
 #   - never voluntarily reduce long position
 #   - clear shorts immediately (being short in an uptrend destroys value)
 PEPPER_SLOPE = 0.001            # price increase per timestamp unit
-PEPPER_TAKE_PREMIUM = 8         # buy asks up to 8 ticks ABOVE trend fair (worth it)
+PEPPER_TAKE_PREMIUM = 4         # was 8 — pay less premium
 PEPPER_SELL_FLOOR = 15          # only fill sell side if bid is 15+ ticks above fair
 PEPPER_BID_EDGE = 2             # passive bid at fair - 2 (aggressive, fills often)
 PEPPER_ASK_EDGE = 20            # passive ask at fair + 20 (very wide, rarely fills)

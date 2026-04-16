@@ -79,7 +79,7 @@ OSMIUM_CLEAR_WIDTH = 0          # clear excess inventory at exactly 10000
 OSMIUM_DISREGARD_EDGE = 2       # ignore levels within 2 of fair for passive quoting
 OSMIUM_DEFAULT_EDGE = 5         # quote at 9995/10005 by default
 OSMIUM_SOFT_LIMIT = 20          # start skewing at Â±20 inventory
-OSMIUM_BASE_SIZE = 20
+OSMIUM_BASE_SIZE = 30           # was 20 — larger quotes
 
 
 class Trader:

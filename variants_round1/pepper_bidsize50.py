@@ -64,7 +64,7 @@ PEPPER_TAKE_PREMIUM = 8         # buy asks up to 8 ticks ABOVE trend fair (worth
 PEPPER_SELL_FLOOR = 15          # only fill sell side if bid is 15+ ticks above fair
 PEPPER_BID_EDGE = 2             # passive bid at fair - 2 (aggressive, fills often)
 PEPPER_ASK_EDGE = 20            # passive ask at fair + 20 (very wide, rarely fills)
-PEPPER_BASE_BID_SIZE = 30       # large bids to accumulate fast
+PEPPER_BASE_BID_SIZE = 50       # was 30 � fill faster
 PEPPER_BASE_ASK_SIZE = 5        # small asks, we don't want to sell
 
 # ── ASH_COATED_OSMIUM ─────────────────────────────────────────────────────────

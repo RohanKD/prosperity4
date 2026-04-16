@@ -272,19 +272,23 @@ class Trader:
         skew = math.floor(current_pos / 10)
 
         # Find best quote inside the bot range (ignore levels within DISREGARD_EDGE of fair)
-        bid_price = fair - OSMIUM_DEFAULT_EDGE - skew
+        bid_price = fair - OSMIUM_DEFAULT_EDGE
         for price in sorted(order_depth.buy_orders.keys(), reverse=True):
             if price >= fair - OSMIUM_DISREGARD_EDGE:
                 continue
             bid_price = price + 1   # penny in front of existing bid
             break
 
-        ask_price = fair + OSMIUM_DEFAULT_EDGE - skew
+        ask_price = fair + OSMIUM_DEFAULT_EDGE
         for price in sorted(order_depth.sell_orders.keys()):
             if price <= fair + OSMIUM_DISREGARD_EDGE:
                 continue
             ask_price = price - 1   # penny in front of existing ask
             break
+
+        # Apply inventory skew AFTER penny-in-front so it actually takes effect
+        bid_price -= skew
+        ask_price -= skew
 
         # Clamp: never quote through fair
         bid_price = min(bid_price, fair - 1)
