@@ -67,8 +67,8 @@ EMERALDS_CFG = {
 # Strong mean reversion: lag-1 autocorr = -0.50, OU half-life ~3 ticks.
 OSMIUM_CFG = {
     "fair_value": 10000, "take_width": 1, "clear_width": 0,
-    "disregard_edge": 1, "join_edge": 2, "default_edge": 4,
-    "soft_limit": 50, "base_size": 40, "skew_per": 10,
+    "disregard_edge": 1, "join_edge": 2, "default_edge": 3,
+    "soft_limit": 60, "base_size": 40, "skew_per": 15,
 }
 # EMA spans (in ticks, ~100ms each) for cycle detection
 # ~91s cycle = 910 ticks, ~333s = 3330 ticks, ~500s = 5000 ticks
